@@ -1,0 +1,13 @@
+# Local defaults. Streamlit Cloud supplies its own settings when hosted, so
+# nothing here needs to change when you deploy.
+[server]
+# headless is deliberately NOT set. Setting it to true stops the browser from
+# opening, which on a desktop just looks like the app has hung.
+maxUploadSize = 10
+
+[theme]
+base = "light"
+primaryColor = "#1a7f37"
+
+[browser]
+gatherUsageStats = false

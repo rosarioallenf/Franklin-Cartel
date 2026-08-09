@@ -1,0 +1,11 @@
+# Never upload these.
+.streamlit/secrets.toml
+data/
+*.db
+out/
+DB_Backup/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.xlsx

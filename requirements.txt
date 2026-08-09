@@ -1,0 +1,12 @@
+# What Streamlit Cloud installs for the hosted app.
+streamlit>=1.50
+pandas>=2.0
+openpyxl>=3.1
+pdfplumber>=0.11
+reportlab>=4.0,<5
+
+# Needed here, unlike the laptop copy: the hosted app keeps its data in
+# Supabase, which is Postgres, and this is the driver that talks to it.
+psycopg[binary]>=3.1
+
+pytest>=8.0
