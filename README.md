@@ -1,16 +1,14 @@
-# Cartel
+# Franklin Cartel
 
-Golf group scoring, quotas and money for the 2026 Cartel.
+Golf group scoring, quotas and money.
 
-The hosted copy keeps its data in Supabase. Set `CARTEL_DB_URL` in the
-Streamlit Cloud app settings under **Secrets**:
+Every file sits at the top level on purpose. GitHub's browser upload page
+handles loose files reliably and folders unreliably, so this build has no
+folders in it at all.
 
-```toml
-CARTEL_DB_URL = "postgresql://..."
-```
+The hosted app keeps its data in Supabase. Set this in the Streamlit app's
+Settings, under Secrets:
 
-With no `CARTEL_DB_URL`, the app falls back to a local SQLite file — which is
-how it runs on a laptop.
+    CARTEL_DB_URL = "postgresql://..."
 
-Nothing in this repository contains golf data. The database, the backups and
-the generated reports are all excluded by `.gitignore`.
+No golf data is in this repository. The database lives in Supabase.

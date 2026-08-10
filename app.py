@@ -26,9 +26,16 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from cartel import backup, db, storage, stats, scoring, reports, scoresheet, pipeline
-from cartel.config import RULES, Stake, db_path, TEE_CODES
-from cartel.teesheet import parse_tee_sheet, reconcile_names
+import cartel_backup as backup
+import cartel_db as db
+import cartel_storage as storage
+import cartel_stats as stats
+import cartel_scoring as scoring
+import cartel_reports as reports
+import cartel_scoresheet as scoresheet
+import cartel_pipeline as pipeline
+from cartel_config import RULES, Stake, db_path, TEE_CODES
+from cartel_teesheet import parse_tee_sheet, reconcile_names
 
 st.set_page_config(page_title="Cartel", page_icon="⛳", layout="wide")
 
@@ -555,7 +562,7 @@ with tab_scores:
 
         # optional AI pre-fill
         try:
-            from cartel import vision
+            import cartel_vision as vision
             vision_ok = vision.available()
         except Exception:
             vision_ok = False

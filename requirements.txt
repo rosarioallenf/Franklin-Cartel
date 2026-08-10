@@ -5,8 +5,5 @@ openpyxl>=3.1
 pdfplumber>=0.11
 reportlab>=4.0,<5
 
-# Needed here, unlike the laptop copy: the hosted app keeps its data in
-# Supabase, which is Postgres, and this is the driver that talks to it.
+# The hosted app keeps its data in Supabase, which is Postgres.
 psycopg[binary]>=3.1
-
-pytest>=8.0
