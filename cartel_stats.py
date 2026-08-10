@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from cartel_config import RULES, LEGACY_STAKE, Stake
+from cartel_config import RULES, LEGACY_STAKE, Stake, db_path
 from cartel_quota import compute_quota, QuotaResult
 import cartel_db as db
 import cartel_storage as storage
@@ -29,21 +29,69 @@ def player_history(conn, year: int | None = None) -> pd.DataFrame:
     return df
 
 
+def _quota_inputs(conn, before: str | None = None):
+    """
+    Everything current_quotas needs, in three queries flat.
+
+    Returns (rounds on file per player, the most recent N point totals per
+    player, manual overrides). The window function that picks the recent N
+    works on both SQLite and Postgres.
+
+    The per-player version issued three queries each - 138 for the roster,
+    and it was called eleven times in one render. Fine against a local file;
+    minutes against a database reached over the internet.
+    """
+    where = "WHERE points_total IS NOT NULL"
+    params: list = []
+    if before:
+        where += " AND played_on < ?"
+        params.append(before)
+
+    counts = {r["name"]: r["c"] for r in conn.execute(
+        f'SELECT name, COUNT(*) AS "c" FROM v_player_rounds {where} GROUP BY name',
+        params)}
+
+    recent: dict[str, list[int]] = {}
+    rows = conn.execute(
+        f"SELECT name, points_total FROM ("
+        f"  SELECT name, points_total, ROW_NUMBER() OVER ("
+        f"    PARTITION BY name ORDER BY played_on DESC, round_id DESC"
+        f'  ) AS "rn" FROM v_player_rounds {where}'
+        f') t WHERE "rn" <= ?',
+        params + [RULES.quota_window])
+    for r in rows:
+        recent.setdefault(r["name"], []).append(r["points_total"])
+
+    manuals = {r["name"]: r["manual_quota"] for r in conn.execute(
+        'SELECT name, manual_quota FROM members WHERE manual_quota IS NOT NULL')}
+
+    return counts, recent, manuals
+
+
 def current_quotas(conn, before: str | None = None,
                    names: list[str] | None = None) -> dict[str, QuotaResult]:
+    key = ("quotas", before, tuple(names) if names else None)
+    return _memoised(key, lambda: _current_quotas(conn, before, names))
+
+
+def _current_quotas(conn, before: str | None = None,
+                    names: list[str] | None = None) -> dict[str, QuotaResult]:
     """
     name -> QuotaResult for every member (or just `names`).
     `before` (ISO date) computes quotas as they stood before that date.
     """
     if names is None:
         names = [r["name"] for r in storage.all_members(conn)]
+
+    counts, recent, manuals = _quota_inputs(conn, before)
+
     out: dict[str, QuotaResult] = {}
     for n in names:
-        available = storage.rounds_on_file(conn, n, before=before)
-        pts = storage.recent_points(conn, n, RULES.quota_window, before=before)
+        available = counts.get(n, 0)
+        pts = recent.get(n, [])
         q = compute_quota(n, pts, rounds_available=available)
 
-        manual = storage.manual_quota(conn, n)
+        manual = manuals.get(n)
         if manual is not None:
             q.quota = manual
             q.is_guest = False
@@ -57,6 +105,10 @@ def current_quotas(conn, before: str | None = None,
 
 
 def year_to_date(conn, year: int) -> pd.DataFrame:
+    return _memoised(("ytd", year), lambda: _year_to_date(conn, year))
+
+
+def _year_to_date(conn, year: int) -> pd.DataFrame:
     """The full member stats table for a calendar year."""
     hist = player_history(conn, year)
     seed = storage.seeds(conn, year)
@@ -141,7 +193,57 @@ def year_to_date(conn, year: int) -> pd.DataFrame:
     return df[cols].sort_values("Name").reset_index(drop=True)
 
 
+# --------------------------------------------------------------------------
+# within-render memo
+# --------------------------------------------------------------------------
+# Streamlit runs the whole script on every interaction, and every tab is drawn
+# whether or not it is the one on screen. So year_to_date gets computed eight
+# times per render and current_quotas eleven, with identical arguments each
+# time. Against a local file that is wasteful; against a database reached over
+# the internet it is the difference between a second and half a minute.
+#
+# Cleared at the start of each render and again after anything is written, so
+# nothing stale is ever shown.
+_memo: dict = {}
+_memo_on = False
+
+
+def begin_render() -> None:
+    """
+    Clear the memo and switch it on for this render.
+
+    Opt-in on purpose. Anything using these functions as a library - the CLI,
+    the tests, a future script - gets no caching at all and cannot be handed a
+    stale answer. Only the app, which knows when a render begins and ends, asks
+    for it.
+    """
+    global _memo_on
+    _memo.clear()
+    _memo_on = True
+
+
+def _memoised(key, produce):
+    if not _memo_on:
+        return produce()
+    # The database itself is part of the key. Without it, a memo filled while
+    # rendering against one database could answer a question about another -
+    # which is exactly what happened when the test suite rendered the app and
+    # left the memo switched on for everything that ran afterwards.
+    import os
+    # The database AND its data version. The version means a cached figure can
+    # never outlive the write that made it wrong: any INSERT, UPDATE or DELETE
+    # moves it on and the old entry is simply never looked at again.
+    key = (os.environ.get("CARTEL_DB_URL") or db_path(), db.data_version(), key)
+    if key not in _memo:
+        _memo[key] = produce()
+    return _memo[key]
+
+
 def rounds_in_window(conn, months: int | None = None) -> dict[str, int]:
+    return _memoised(("window", months), lambda: _rounds_in_window(conn, months))
+
+
+def _rounds_in_window(conn, months: int | None = None) -> dict[str, int]:
     """
     Completed rounds per player inside the ranking window.
 
@@ -186,6 +288,10 @@ def leaderboards(conn, year: int, min_rounds: int = 4) -> dict[str, pd.DataFrame
 
 
 def year_summary(conn, year: int) -> dict:
+    return _memoised(("summary", year), lambda: _year_summary(conn, year))
+
+
+def _year_summary(conn, year: int) -> dict:
     """
     The whole calendar year, imported rounds included.
 
@@ -270,18 +376,31 @@ def quota_basis(conn, names: list[str] | None = None,
         names = [r["name"] for r in storage.all_members(conn)]
 
     window = RULES.quota_window
+
+    # One query for everybody, not one per player. Same view, same filter, same
+    # ordering as storage.recent_points - the window function just takes the top
+    # N per player in a single pass instead of a query each.
+    where = "WHERE points_total IS NOT NULL"
+    params: list = []
+    if before:
+        where += " AND played_on < ?"
+        params.append(before)
+    sql = (
+        f"SELECT name, played_on, score, points_front, points_back, points_total "
+        f"FROM ( SELECT name, played_on, score, points_front, points_back, "
+        f"       points_total, ROW_NUMBER() OVER (PARTITION BY name "
+        f'       ORDER BY played_on DESC, round_id DESC) AS "rn" '
+        f"       FROM v_player_rounds {where} ) t "
+        f'WHERE "rn" <= ? ORDER BY name, "rn"'
+    )
+    by_player: dict[str, list[dict]] = {}
+    for r in conn.execute(sql, params + [window]):
+        d = dict(r)
+        by_player.setdefault(d.pop("name"), []).append(d)
+
     frames = []
     for n in sorted(names):
-        sql = ("SELECT played_on, score, points_front, points_back, points_total "
-               "FROM v_player_rounds WHERE name = ? AND points_total IS NOT NULL")
-        params: list = [n]
-        if before:
-            sql += " AND played_on < ?"
-            params.append(before)
-        sql += " ORDER BY played_on DESC, round_id DESC LIMIT ?"
-        params.append(window)
-
-        rows = [dict(r) for r in conn.execute(sql, params)]
+        rows = by_player.get(n, [])
         if not rows:
             continue
 
