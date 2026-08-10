@@ -157,7 +157,16 @@ def open_connection(db_path: str | Path | None = None):
             ) from exc
         if url.startswith("postgresql+psycopg://"):
             url = url.replace("postgresql+psycopg://", "postgresql://", 1)
-        return _PgConnection(psycopg.connect(url, row_factory=dict_row))
+        # prepare_threshold=None disables psycopg's automatic prepared
+        # statements. Supabase's transaction pooler hands each transaction to
+        # whichever backend is free, so a statement prepared on one connection
+        # is unknown to the next - psycopg then re-prepares under a name that
+        # already exists and Postgres raises DuplicatePreparedStatement.
+        #
+        # Nothing here runs often enough for prepared statements to matter, and
+        # a pooled connection is what hosting gives you.
+        return _PgConnection(
+            psycopg.connect(url, row_factory=dict_row, prepare_threshold=None))
 
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
