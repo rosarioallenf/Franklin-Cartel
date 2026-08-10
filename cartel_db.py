@@ -27,26 +27,6 @@ def database_url() -> str | None:
     return url or None
 
 
-# Bumped by anything that changes data. The stats memo keys on it, so a cached
-# figure can never outlive the write that made it wrong - in the app, in the
-# tests, or from the command line.
-_writes = 0
-_MUTATES = ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "DROP", "REPLACE")
-
-
-def note_write(sql) -> None:
-    global _writes
-    if not isinstance(sql, str):
-        return
-    head = sql.lstrip().upper()
-    if head.startswith(_MUTATES):
-        _writes += 1
-
-
-def data_version() -> int:
-    return _writes
-
-
 def is_postgres(url: str | None = None) -> bool:
     url = url if url is not None else database_url()
     return bool(url) and url.startswith(POSTGRES_PREFIXES)
@@ -122,13 +102,11 @@ class _PgConnection:
         self._conn = conn
 
     def execute(self, sql, params=()):
-        note_write(sql)
         cur = self._conn.cursor()
         cur.execute(translate_params(sql), tuple(params) if params else None)
         return _PgCursorWrapper(cur)
 
     def executemany(self, sql, seq):
-        note_write(sql)
         seq = list(seq)
         if not seq:
             return _PgCursorWrapper(self._conn.cursor())
@@ -142,7 +120,6 @@ class _PgConnection:
         return _PgCursorWrapper(cur)
 
     def executescript(self, sql):
-        note_write(sql)
         with self._conn.cursor() as cur:
             cur.execute(translate_ddl(sql))
         return self
@@ -188,36 +165,11 @@ def open_connection(db_path: str | Path | None = None):
         #
         # Nothing here runs often enough for prepared statements to matter, and
         # a pooled connection is what hosting gives you.
-        # Without a timeout psycopg waits indefinitely, so a database that is
-        # paused or restarting leaves the app hanging with no message at all.
-        #
-        # But the number has to be generous. Ten seconds looked reasonable and
-        # was not: a hosted app opening its first connection to a pooler that
-        # is itself waking up can easily take longer, and a timeout that fires
-        # on a healthy database is worse than no timeout - it turns a slow
-        # start into a crash. Forty-five seconds catches a genuinely dead
-        # database without ever cutting off a live one.
-        try:
-            return _PgConnection(psycopg.connect(
-                url, row_factory=dict_row, prepare_threshold=None,
-                connect_timeout=45))
-        except Exception as exc:
-            raise RuntimeError(
-                f"Couldn't reach the hosted database within 45 seconds.\n\n"
-                f"{exc}\n\n"
-                f"Usually one of:\n"
-                f"  - the Supabase project is paused or restarting "
-                f"(check the dashboard and press Restore)\n"
-                f"  - the connection string or password is wrong\n"
-                f"  - too many connections are already open; restarting the "
-                f"Supabase project clears them"
-            ) from exc
+        return _PgConnection(
+            psycopg.connect(url, row_factory=dict_row, prepare_threshold=None))
 
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
-    # sqlite3 hands back a plain connection rather than a wrapper, so the write
-    # counter is fed by its own tracer instead.
-    conn.set_trace_callback(note_write)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
