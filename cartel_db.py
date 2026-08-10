@@ -188,18 +188,22 @@ def open_connection(db_path: str | Path | None = None):
         #
         # Nothing here runs often enough for prepared statements to matter, and
         # a pooled connection is what hosting gives you.
-        # connect_timeout matters more than it looks. Without it psycopg waits
-        # indefinitely, so a database that is paused, restarting or out of
-        # connections leaves the app hanging on startup with no message at all -
-        # which is indistinguishable from a crash, and impossible to diagnose.
-        # Ten seconds, then say plainly what happened.
+        # Without a timeout psycopg waits indefinitely, so a database that is
+        # paused or restarting leaves the app hanging with no message at all.
+        #
+        # But the number has to be generous. Ten seconds looked reasonable and
+        # was not: a hosted app opening its first connection to a pooler that
+        # is itself waking up can easily take longer, and a timeout that fires
+        # on a healthy database is worse than no timeout - it turns a slow
+        # start into a crash. Forty-five seconds catches a genuinely dead
+        # database without ever cutting off a live one.
         try:
             return _PgConnection(psycopg.connect(
                 url, row_factory=dict_row, prepare_threshold=None,
-                connect_timeout=10))
+                connect_timeout=45))
         except Exception as exc:
             raise RuntimeError(
-                f"Couldn't reach the hosted database within 10 seconds.\n\n"
+                f"Couldn't reach the hosted database within 45 seconds.\n\n"
                 f"{exc}\n\n"
                 f"Usually one of:\n"
                 f"  - the Supabase project is paused or restarting "
