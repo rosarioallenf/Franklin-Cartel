@@ -106,6 +106,7 @@ def _played(prefill: dict, entry) -> bool:
 
 
 _ensure_db()
+stats.begin_render()   # the memo must not survive from the previous render
 
 st.title("⛳ Cartel")
 with storage.connect() as _c:
@@ -806,6 +807,7 @@ with tab_scores:
                         # updated" is a claim; the season total before and after
                         # is evidence, and it makes a round that did not land
                         # obvious instead of something to be puzzled over later.
+                        stats.begin_render()   # figures below must reflect the post
                         played = date.fromisoformat(rnd["played_on"])
                         with storage.connect() as conn:
                             after_yr = stats.year_summary(conn, played.year)

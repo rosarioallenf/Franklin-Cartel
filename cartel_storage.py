@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -171,21 +172,85 @@ CREATE VIEW IF NOT EXISTS v_player_rounds AS
 """
 
 
+# A hosted database is reached over the internet, where opening a connection
+# costs a TLS handshake - a tenth of a second or more. Rendering the app once
+# opens forty of them, which is several seconds of waiting before a single
+# query runs. Opening a local SQLite file costs microseconds, so this never
+# showed up until the data moved to Supabase.
+#
+# So Postgres connections are kept and reused. SQLite keeps opening and closing,
+# which is cheap and avoids any question of a stale file handle.
+_shared = None
+_shared_lock = threading.RLock()
+_depth = 0
+
+
+def _shared_connection():
+    """The one live Postgres connection, opened on demand and re-opened if dead."""
+    global _shared
+    if _shared is not None:
+        try:
+            _shared.execute("SELECT 1").fetchone()
+            return _shared
+        except Exception:
+            try:
+                _shared.close()
+            except Exception:
+                pass
+            _shared = None
+    _shared = db.open_connection(db_path())
+    return _shared
+
+
+def close_shared() -> None:
+    """Drop the reused connection. Mostly for tests."""
+    global _shared
+    if _shared is not None:
+        try:
+            _shared.close()
+        except Exception:
+            pass
+        _shared = None
+
+
 @contextmanager
 def connect(path: str | Path | None = None):
     """
     Opens SQLite by default, or Postgres when CARTEL_DB_URL is set. Callers
     never need to know which.
     """
-    conn = db.open_connection(path or db_path())
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    if not db.is_postgres():
+        conn = db.open_connection(path or db_path())
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return
+
+    # Reused connection. The depth counter matters because a few callers nest -
+    # committing on the way out of an inner block would half-commit the outer
+    # one's work.
+    global _depth
+    with _shared_lock:
+        conn = _shared_connection()
+        _depth += 1
+        try:
+            yield conn
+            if _depth == 1:
+                conn.commit()
+        except Exception:
+            if _depth == 1:
+                try:
+                    conn.rollback()
+                except Exception:
+                    close_shared()
+            raise
+        finally:
+            _depth -= 1
 
 
 # Columns added after the first release. Existing databases are upgraded in
