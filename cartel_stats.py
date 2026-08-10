@@ -29,6 +29,45 @@ def player_history(conn, year: int | None = None) -> pd.DataFrame:
     return df
 
 
+def _quota_inputs(conn, before: str | None = None):
+    """
+    Everything current_quotas needs, in three queries flat.
+
+    Returns (rounds on file per player, the most recent N point totals per
+    player, manual overrides). The window function that picks the recent N
+    works on both SQLite and Postgres.
+
+    The per-player version issued three queries each - 138 for the roster,
+    and it was called eleven times in one render. Fine against a local file;
+    minutes against a database reached over the internet.
+    """
+    where = "WHERE points_total IS NOT NULL"
+    params: list = []
+    if before:
+        where += " AND played_on < ?"
+        params.append(before)
+
+    counts = {r["name"]: r["c"] for r in conn.execute(
+        f'SELECT name, COUNT(*) AS "c" FROM v_player_rounds {where} GROUP BY name',
+        params)}
+
+    recent: dict[str, list[int]] = {}
+    rows = conn.execute(
+        f"SELECT name, points_total FROM ("
+        f"  SELECT name, points_total, ROW_NUMBER() OVER ("
+        f"    PARTITION BY name ORDER BY played_on DESC, round_id DESC"
+        f'  ) AS "rn" FROM v_player_rounds {where}'
+        f') t WHERE "rn" <= ?',
+        params + [RULES.quota_window])
+    for r in rows:
+        recent.setdefault(r["name"], []).append(r["points_total"])
+
+    manuals = {r["name"]: r["manual_quota"] for r in conn.execute(
+        'SELECT name, manual_quota FROM members WHERE manual_quota IS NOT NULL')}
+
+    return counts, recent, manuals
+
+
 def current_quotas(conn, before: str | None = None,
                    names: list[str] | None = None) -> dict[str, QuotaResult]:
     """
@@ -37,13 +76,16 @@ def current_quotas(conn, before: str | None = None,
     """
     if names is None:
         names = [r["name"] for r in storage.all_members(conn)]
+
+    counts, recent, manuals = _quota_inputs(conn, before)
+
     out: dict[str, QuotaResult] = {}
     for n in names:
-        available = storage.rounds_on_file(conn, n, before=before)
-        pts = storage.recent_points(conn, n, RULES.quota_window, before=before)
+        available = counts.get(n, 0)
+        pts = recent.get(n, [])
         q = compute_quota(n, pts, rounds_available=available)
 
-        manual = storage.manual_quota(conn, n)
+        manual = manuals.get(n)
         if manual is not None:
             q.quota = manual
             q.is_guest = False
@@ -270,18 +312,34 @@ def quota_basis(conn, names: list[str] | None = None,
         names = [r["name"] for r in storage.all_members(conn)]
 
     window = RULES.quota_window
+
+    # One query for everybody, not one per player. Same view, same filter, same
+    # ordering as storage.recent_points - the window function just takes the top
+    # N per player in a single pass instead of a query each.
+    where = "WHERE points_total IS NOT NULL"
+    params: list = []
+    if before:
+        where += " AND played_on < ?"
+        params.append(before)
+    sql = (
+        f"SELECT name, played_on, score, points_front, points_back, points_total "
+        f"FROM ( SELECT name, played_on, score, points_front, points_back, "
+        f"       points_total, ROW_NUMBER() OVER (PARTITION BY name "
+        f'       ORDER BY played_on DESC, round_id DESC) AS "rn" '
+        f"       FROM v_player_rounds {where} ) t "
+        f'WHERE "rn" <= ? ORDER BY name, "rn"'
+    )
+    # The same counts current_quotas uses - one query, not one per player.
+    counts, _recent, _manuals = _quota_inputs(conn, before)
+
+    by_player: dict[str, list[dict]] = {}
+    for r in conn.execute(sql, params + [window]):
+        d = dict(r)
+        by_player.setdefault(d.pop("name"), []).append(d)
+
     frames = []
     for n in sorted(names):
-        sql = ("SELECT played_on, score, points_front, points_back, points_total "
-               "FROM v_player_rounds WHERE name = ? AND points_total IS NOT NULL")
-        params: list = [n]
-        if before:
-            sql += " AND played_on < ?"
-            params.append(before)
-        sql += " ORDER BY played_on DESC, round_id DESC LIMIT ?"
-        params.append(window)
-
-        rows = [dict(r) for r in conn.execute(sql, params)]
+        rows = by_player.get(n, [])
         if not rows:
             continue
 
@@ -300,7 +358,7 @@ def quota_basis(conn, names: list[str] | None = None,
 
         totals = [r["points_total"] for r in rows]
         avg = sum(totals) / len(totals)
-        available = storage.rounds_on_file(conn, n, before=before)
+        available = counts.get(n, 0)
         q = compute_quota(n, totals, rounds_available=available)
 
         block.append({
