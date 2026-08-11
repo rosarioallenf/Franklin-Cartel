@@ -184,24 +184,29 @@ def require_admin(what: str, key: str) -> bool:
 # ---- shutting down properly ----
 # Closing the browser leaves the server running: harmless, but it does mean the
 # window stays open until Ctrl+C. This stops both from inside the app.
+# Only offered when you started the server yourself. Hosted, the server is
+# shared, so stopping it takes the app down for everyone - and a killed process
+# leaves no error, just a dead app and a log that stops mid-sentence.
+_can_exit = not db.is_postgres()
 _x1, _x2 = st.columns([5, 1])
-with _x2:
-    if st.session_state.get("confirm_exit"):
-        st.caption("Sure?")
-        if st.button("Yes, close", type="primary", width='stretch'):
-            st.session_state["confirm_exit"] = False
-            st.success("Cartel has stopped. You can close this browser tab.")
-            st.caption("Double-click START.bat when you want it again.")
-            time.sleep(1.5)          # let the message reach the browser first
-            os._exit(0)              # the whole point: stop the server, not the script
-        if st.button("Cancel", width='stretch'):
-            st.session_state["confirm_exit"] = False
-            st.rerun()
-    else:
-        if st.button("Exit app", width='stretch',
-                     help="Stops the app and closes the black window."):
-            st.session_state["confirm_exit"] = True
-            st.rerun()
+with _x2 if _can_exit else st.empty():
+  if _can_exit:
+      if st.session_state.get("confirm_exit"):
+          st.caption("Sure?")
+          if st.button("Yes, close", type="primary", width='stretch'):
+              st.session_state["confirm_exit"] = False
+              st.success("Cartel has stopped. You can close this browser tab.")
+              st.caption("Double-click START.bat when you want it again.")
+              time.sleep(1.5)          # let the message reach the browser first
+              os._exit(0)              # the whole point: stop the server, not the script
+          if st.button("Cancel", width='stretch'):
+              st.session_state["confirm_exit"] = False
+              st.rerun()
+      else:
+          if st.button("Exit app", width='stretch',
+                       help="Stops the app and closes the black window."):
+              st.session_state["confirm_exit"] = True
+              st.rerun()
 
 (tab_today, tab_scores, tab_standings, tab_player, tab_quota, tab_roster,
  tab_health) = st.tabs(
