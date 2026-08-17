@@ -1,0 +1,27 @@
+FOR GITHUB — this is the hosted version, not the laptop one.
+
+Upload every file here to
+    github.com/rosarioallenf/Franklin-Cartel
+using Add file -> Upload files -> drag them all in -> Commit changes.
+
+Fourteen files, no folders. They replace the ones already there.
+
+BEFORE OR AFTER, ADD THE LINK TO THE GUIDE
+  share.streamlit.io -> the three dots beside your app -> Settings -> Secrets
+  Add a second line under the one already there:
+
+      HOW_TO_URL = "https://drive.google.com/drive/folders/19mNzqCCtJvd-6qDqI67Q6z7bMjzwGdro"
+
+  Leave CARTEL_DB_URL exactly as it is. Save.
+
+  Without this line the app works fine, it simply shows no link.
+
+THEN
+  Delete the app and redeploy it, rather than rebooting. Rebooting has been
+  unreliable; a redeploy has worked every time. Your files and your records are
+  untouched by it - only the pointer is rebuilt.
+
+WHAT THE GROUP WILL NOTICE
+  The seven tabs become a row of page buttons.
+  Pages take about two seconds instead of fifteen.
+  A "How to use this app" link under the buttons.

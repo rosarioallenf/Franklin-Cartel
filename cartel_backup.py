@@ -147,6 +147,52 @@ def prune(keep: int = KEEP) -> int:
     return removed
 
 
+def snapshot_bytes() -> tuple[bytes, str]:
+    """
+    The whole database as a single SQLite file in memory, ready to hand to a
+    browser as a download.
+
+    Works whichever way the data is stored. On a laptop it copies the file; on
+    a hosted Postgres it builds an equivalent SQLite file from the rows, so what
+    comes down is an ordinary Cartel database that the laptop app can open.
+    """
+    import sqlite3
+    import tempfile
+    import cartel_storage as storage
+
+    TABLES = ["members", "ledger_seed", "stakes", "writeoffs", "app_settings",
+              "activity", "rounds", "entries", "side_outcomes", "payouts"]
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    name = f"cartel_{stamp}.db"
+
+    if not db.is_postgres():
+        return Path(db_path()).read_bytes(), name
+
+    with storage.connect() as src:
+        data = {t: [dict(r) for r in src.execute(f"SELECT * FROM {t}")]
+                for t in TABLES}
+
+    tmp = Path(tempfile.mkdtemp()) / name
+    previous = os.environ.pop("CARTEL_DB_URL", None)
+    try:
+        storage.init_db(str(tmp))
+        with storage.connect(str(tmp)) as dst:
+            for t in reversed(TABLES):
+                dst.execute(f"DELETE FROM {t}")
+            for t in TABLES:
+                rows = data[t]
+                if not rows:
+                    continue
+                cols = list(rows[0].keys())
+                ph = ", ".join(f":{c}" for c in cols)
+                dst.executemany(
+                    f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({ph})", rows)
+    finally:
+        if previous is not None:
+            os.environ["CARTEL_DB_URL"] = previous
+    return tmp.read_bytes(), name
+
+
 def restore(backup: str | Path, confirm: bool = False) -> Path:
     """
     Put a backup back, having first set the current database aside.

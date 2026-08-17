@@ -440,6 +440,10 @@ def manual_tee_sheet(played_on, course: str, teams: list[list[str]],
 # after the round
 # --------------------------------------------------------------------------
 
+def _money(v: float) -> str:
+    return f"${v:,.2f}"
+
+
 def settle_round(round_id: int, results: list[dict], db_path: str | None = None,
                  out_dir: str = ".", post: bool = True) -> dict:
     """
@@ -509,13 +513,40 @@ def settle_round(round_id: int, results: list[dict], db_path: str | None = None,
                                       exclude_round_id=round_id)
         conn.execute("UPDATE rounds SET carry_in = ? WHERE round_id = ?",
                      (carry, round_id))
+        out: dict = {}
+
+        # Money this round carries can only be collected by a LATER round that
+        # has not yet been settled. Post Sunday first and then Saturday, and
+        # Saturday's carry has nowhere to go - it sits in its own record for
+        # ever, while the Health tab reports it as legitimate money in hand.
+        # Verified 16 Aug 2026: $160 in, $120 out, $40 stranded.
+        later = None
+        if post:
+            later = conn.execute(
+                """SELECT round_id, round_no, played_on FROM rounds
+                   WHERE status = 'posted' AND played_on > ?
+                   ORDER BY played_on ASC, round_id ASC LIMIT 1""",
+                (rnd["played_on"],)).fetchone()
+
         result = scoring.score_round(entries, carry_in=carry,
                                      stake=storage.round_stake(conn, round_id))
         if post:
             storage.post_round(conn, round_id, result)
 
         played_on = datetime.fromisoformat(rnd["played_on"]).date()
-        out = {"result": result, "round_pdf": None}
+        # Carried money can only be collected by a later round that has not yet
+        # been settled. If one has, the carry would sit in this round's record
+        # for ever while the Health tab reported it as money in hand.
+        if post and later is not None and result.carried_money:
+            result.warnings.append(
+                f"{_money(result.carried_money)} carried forward, but Round "
+                f"{later['round_no'] or later['round_id']} ({later['played_on']}) "
+                f"is already posted and cannot collect it. Re-post that round "
+                f"now — open it on this tab, tick the re-post box and post it "
+                f"again — and the carry will find its way across."
+            )
+
+        out.update({"result": result, "round_pdf": None})
 
         # Only a POSTED round produces paperwork. A preview used to write the
         # same Results PDF, so working out the money and actually posting it

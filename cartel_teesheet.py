@@ -363,9 +363,8 @@ def _surname_key(s: str) -> str:
     return f"{last}|{first}"
 
 
-# pdfminer logs a FontBBox warning every time a page object is touched, because
-# one font in the club's tee sheet omits an optional bounding box. Harmless,
-# but it floods the console and buries anything that matters.
+# pdfminer logs a FontBBox warning every time a page object is touched,
+# because one font in the club's tee sheet omits an optional bounding box.
 import logging as _logging
 _logging.getLogger("pdfminer").setLevel(_logging.ERROR)
 _logging.getLogger("pdfplumber").setLevel(_logging.ERROR)

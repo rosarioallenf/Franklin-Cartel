@@ -203,8 +203,9 @@ def rounds_in_window(conn, months: int | None = None) -> dict[str, int]:
         (cutoff,))}
 
 
-def leaderboards(conn, year: int, min_rounds: int = 4) -> dict[str, pd.DataFrame]:
-    df = year_to_date(conn, year)
+def leaderboards(conn, year: int, min_rounds: int = 4,
+                 ytd: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
+    df = year_to_date(conn, year) if ytd is None else ytd
     played = df[(df["Rds"] >= min_rounds) & (~df["Guest"])]
     if played.empty:
         # Nothing to rank yet. Return the right shape so the UI still draws.
@@ -384,7 +385,7 @@ def quota_basis(conn, names: list[str] | None = None,
 # season awards and the player page
 # --------------------------------------------------------------------------
 
-def season_awards(conn, year: int) -> dict:
+def season_awards(conn, year: int, ytd: pd.DataFrame | None = None) -> dict:
     """
     The season as it stands right now - "if it ended today".
 
@@ -397,7 +398,7 @@ def season_awards(conn, year: int) -> dict:
     skats, most rounds) have no threshold - they measure turning up, and
     turning up is the qualification.
     """
-    df = year_to_date(conn, year)
+    df = year_to_date(conn, year) if ytd is None else ytd
     played = df[df["Rds"] > 0].copy()
     eligible = played[played["Rank"].notna()]
 
@@ -512,21 +513,24 @@ def player_card(conn, name: str, year: int) -> dict:
     # What their quota was after each round, so the trend can be drawn. Rebuilt
     # from the history rather than stored: quotas are a moving five-round
     # average and were never meant to be frozen per round.
+    # One query for this player's whole scored history, then the rolling quota
+    # is worked out in memory. The old version asked the database twice for
+    # every point on the chart - fine against a local file, but a man with
+    # eighteen rounds cost thirty-six round trips across the internet.
+    every = [dict(r) for r in conn.execute(
+        """SELECT played_on, points_total FROM v_player_rounds
+           WHERE name = ? AND points_total IS NOT NULL
+           ORDER BY played_on ASC, round_id ASC""", (name,))]
+
     trend = []
     dates = sorted(hist[hist["name"] == name]["played_on"].dt.date.astype(str)) \
         if not hist.empty else []
     for d in dates:
-        q = compute_quota(
-            name,
-            [r["points_total"] for r in conn.execute(
-                """SELECT points_total FROM v_player_rounds WHERE name = ?
-                   AND played_on <= ? AND points_total IS NOT NULL
-                   ORDER BY played_on DESC, round_id DESC LIMIT ?""",
-                (name, d, RULES.quota_window))],
-            rounds_available=conn.execute(
-                """SELECT COUNT(*) n FROM v_player_rounds WHERE name = ?
-                   AND played_on <= ? AND points_total IS NOT NULL""",
-                (name, d)).fetchone()["n"])
+        # everything up to and including that date, most recent first -
+        # exactly what the query used to return
+        upto = [r["points_total"] for r in every if str(r["played_on"])[:10] <= d]
+        recent = list(reversed(upto))[:RULES.quota_window]
+        q = compute_quota(name, recent, rounds_available=len(upto))
         trend.append({"Date": d, "Quota": q.quota})
 
     return {

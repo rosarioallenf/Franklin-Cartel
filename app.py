@@ -208,16 +208,45 @@ with _x2 if _can_exit else st.empty():
               st.session_state["confirm_exit"] = True
               st.rerun()
 
-(tab_today, tab_scores, tab_standings, tab_player, tab_quota, tab_roster,
- tab_health) = st.tabs(
-    ["Today", "Enter scores", "Standings", "Player", "Next quota", "Roster", "Health"]
-)
+# A page selector, not tabs. st.tabs draws EVERY tab on every interaction -
+# they are hidden with CSS, not skipped - so opening Standings also computed
+# Next quota, Player, Roster and Health. Against a local file that was merely
+# wasteful; against a database reached over the internet it meant paying for
+# the whole app on every click.
+#
+# With a selector only the chosen page runs. Everything below is otherwise
+# unchanged: each block reads exactly as it did under `with tab_x:`.
+PAGES = ["Today", "Enter scores", "Standings", "Player", "Next quota",
+         "Roster", "Health"]
+# A radio rather than a fancier control: it is one tap per page, every option
+# stays visible instead of hiding behind a dropdown, and the tap targets are
+# bigger than a list item on a phone. It is also the one widget the test
+# harness can drive, so the pages can be checked automatically.
+page = st.radio("Page", PAGES, horizontal=True, key="page",
+                label_visibility="collapsed")
+
+# A link to the written guide, if one has been set. Read from configuration
+# rather than written into the code, so the document can be moved or replaced
+# without touching the app. Set HOW_TO_URL in Streamlit's Secrets, or as an
+# environment variable on a laptop.
+def _how_to_url() -> str:
+    try:
+        if "HOW_TO_URL" in st.secrets:
+            return str(st.secrets["HOW_TO_URL"]).strip()
+    except Exception:
+        pass
+    return os.environ.get("HOW_TO_URL", "").strip()
+
+
+_howto = _how_to_url()
+if _howto:
+    st.caption(f"New to this, or stuck? [How to use this app]({_howto})")
 
 
 # ==========================================================================
 # TODAY — prep a round
 # ==========================================================================
-with tab_today:
+if page == "Today":
     st.subheader("Set up a round")
     st.write(
         "Drop in the tee sheet PDF. The app reads the round number, date, course and "
@@ -507,7 +536,7 @@ with tab_today:
 # ==========================================================================
 # ENTER SCORES
 # ==========================================================================
-with tab_scores:
+if page == "Enter scores":
     st.subheader("Enter the results")
 
     with storage.connect() as conn:
@@ -520,10 +549,20 @@ with tab_scores:
             f"{COURSES.get(r['course'], r['course'])} ({r['status']})": r["round_id"]
             for r in rounds
         }
-        default = 0
-        if st.session_state.get("round_id") in labels.values():
+        # A key, so the choice survives a rerun, a crash or a restart. Without
+        # one it fell back to whichever round a scoresheet was last built for -
+        # which on 16 Aug 2026 meant posting an empty round while the intended
+        # one sat untouched.
+        options = list(labels)
+        remembered = st.session_state.get("pick_round")
+        if remembered in options:
+            default = options.index(remembered)
+        elif st.session_state.get("round_id") in labels.values():
             default = list(labels.values()).index(st.session_state["round_id"])
-        picked = st.selectbox("Which round?", list(labels), index=default)
+        else:
+            default = 0
+        picked = st.selectbox("Which round?", options, index=default,
+                              key="pick_round")
         rid = labels[picked]
 
         with storage.connect() as conn:
@@ -735,8 +774,12 @@ with tab_scores:
             preview_clicked = c1.button("Work out the money", width='stretch')
             if not current_user():
                 st.info("Pick your name at the top before posting.")
+            post_label = (
+                f"Post Round {rnd['round_no'] or rid} — "
+                f"{date.fromisoformat(rnd['played_on']).strftime('%d %b %Y')} — "
+                f"{COURSES.get(rnd['course'], rnd['course'])}")
             post_clicked = c2.button(
-                "Already posted" if (already_posted and not unlock) else "Post the round",
+                "Already posted" if (already_posted and not unlock) else post_label,
                 type="primary", width='stretch',
                 disabled=already_posted and not unlock,
                 help=("This round is already posted. Tick the box above if you need "
@@ -774,6 +817,28 @@ with tab_scores:
             if post_clicked and not current_user():
                 st.error("Pick your name at the top first — a posted round records "
                          "who posted it.")
+                post_clicked = False
+
+            # All-or-nothing on points. A half-scored round moves quotas for
+            # some men and not others, and nobody notices for weeks. A guest's
+            # points count too - three scored rounds is how he earns his way to
+            # a quota, so leaving his blank quietly costs him one.
+            present = [r for r in payload if r["played"]]
+            with_points = [r for r in present if r["points_front"] is not None
+                           or r["points_back"] is not None]
+            without = [r for r in present if r not in with_points]
+            if post_clicked and with_points and without:
+                st.error(
+                    f"**{len(with_points)} player(s) have points and "
+                    f"{len(without)} do not:** "
+                    + ", ".join(r["name"] for r in without[:8])
+                    + ("..." if len(without) > 8 else "")
+                    + ".\n\nEnter points for everyone who played, or clear them "
+                    "all and post it as a round that doesn't count toward quotas. "
+                    "A guest's points count too — they are how he earns his three "
+                    "rounds toward a quota. Untick **Played** for anyone who "
+                    "wasn't there."
+                )
                 post_clicked = False
 
             if post_clicked and queries and not acknowledged:
@@ -891,11 +956,14 @@ with tab_scores:
 # ==========================================================================
 # STANDINGS
 # ==========================================================================
-with tab_standings:
+if page == "Standings":
     year = st.selectbox("Year", list(range(date.today().year, 2021, -1)), key="yr")
     with storage.connect() as conn:
+        # Computed once and handed on. Standings used to rebuild the whole
+        # member table four times over - once here, once inside leaderboards,
+        # once inside season_awards.
         ytd = stats.year_to_date(conn, year)
-        boards = stats.leaderboards(conn, year)
+        boards = stats.leaderboards(conn, year, ytd=ytd)
         rec = stats.house_reconciliation(conn, year)
         yr = stats.year_summary(conn, year)
 
@@ -975,7 +1043,7 @@ with tab_standings:
 
     st.subheader(f"{year} season awards")
     with storage.connect() as conn:
-        season = stats.season_awards(conn, year)
+        season = stats.season_awards(conn, year, ytd=ytd)
     if season["as_of"]:
         st.caption(
             f"**As if the season ended today** — everything below is worked out "
@@ -1021,7 +1089,7 @@ with tab_standings:
 # ==========================================================================
 # PLAYER
 # ==========================================================================
-with tab_player:
+if page == "Player":
     st.subheader("One player, everything")
     with storage.connect() as conn:
         roster = [r["name"] for r in storage.all_members(conn)]
@@ -1093,7 +1161,7 @@ with tab_player:
 # ==========================================================================
 # NEXT QUOTA — the five rounds each quota rests on
 # ==========================================================================
-with tab_quota:
+if page == "Next quota":
     st.caption(
         f"The most recent {RULES.quota_window} scored rounds behind each player's "
         "next quota. Same rounds, same order the app itself uses — if something "
@@ -1162,7 +1230,7 @@ with tab_quota:
 # ==========================================================================
 # ROSTER  (the app screen; the Excel worksheet is called "Membership")
 # ==========================================================================
-with tab_roster:
+if page == "Roster":
     st.subheader("Roster")
     st.caption(
         f"Tee is which set of tees they play. Anyone with fewer than "
@@ -1227,7 +1295,7 @@ with tab_roster:
 # ==========================================================================
 # HEALTH
 # ==========================================================================
-with tab_health:
+if page == "Health":
     st.subheader("Data health")
     year = st.selectbox("Year", list(range(date.today().year, 2021, -1)), key="hyr")
     with storage.connect() as conn:
@@ -1550,34 +1618,43 @@ with tab_health:
                     st.rerun()
 
     st.divider()
-    st.markdown("**Backups**")
-    st.caption(
-        f"A snapshot is taken automatically every time a round is posted, into "
-        f"`{backup.backup_dir()}` — deliberately outside the app folder, so "
-        f"installing an update can't touch it. The newest {backup.KEEP} are kept; "
-        f"each is about 0.3 MB."
-    )
-    bks = backup.list_backups()
-    bc1, bc2 = st.columns([1, 2])
-    with bc1:
-        if st.button("Back up now"):
-            r = backup.make_backup(reason="manual")
-            if r.ok:
-                st.success(f"Saved {r.path.name}")
-            else:
-                st.warning(r.skipped)
-            st.rerun()
-    with bc2:
-        if bks:
-            st.caption(f"Most recent: `{bks[0].name}`")
-    if bks:
-        st.dataframe(pd.DataFrame([{
-            "Backup": f.name,
-            "Taken": pd.Timestamp(f.stat().st_mtime, unit="s").strftime("%d %b %Y %H:%M"),
-            "Size": f"{f.stat().st_size / 1024:,.0f} KB",
-        } for f in bks[:15]]), hide_index=True, width='stretch')
+    st.markdown("**A copy of the records**")
+
+    hosted = db.is_postgres()
+    if hosted:
+        st.caption(
+            "The records live on the hosted database, which keeps its own "
+            "backups. This gives you a copy of your own — an ordinary Cartel "
+            "database file. Worth taking after each weekend."
+        )
     else:
-        st.info("No backups yet. One is taken the next time you post a round.")
+        st.caption(
+            f"A snapshot is taken automatically every time a round is posted, "
+            f"into `{backup.backup_dir()}`. This button gives you one on demand."
+        )
+
+    if st.button("Prepare a copy to download"):
+        try:
+            blob, fname = backup.snapshot_bytes()
+            st.session_state["db_blob"] = (blob, fname)
+        except Exception as exc:
+            st.error(f"Couldn't build the copy: {exc}")
+
+    if st.session_state.get("db_blob"):
+        blob, fname = st.session_state["db_blob"]
+        st.download_button(f"⬇ {fname}  ({len(blob)/1024:,.0f} KB)",
+                           blob, file_name=fname, mime="application/octet-stream")
+        st.caption(
+            "Keep it somewhere off this machine — Dropbox or OneDrive. To use "
+            "it one day, rename it `cartel.db` and put it in the app's `data` "
+            "folder."
+        )
+
+    if not hosted:
+        bks = backup.list_backups()
+        if bks:
+            st.caption(f"Automatic snapshots on file: {len(bks)}, "
+                       f"most recent `{bks[0].name}`")
 
     st.divider()
     st.markdown("**Files this app has produced**")
